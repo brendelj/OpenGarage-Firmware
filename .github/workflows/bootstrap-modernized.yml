@@ -1,0 +1,118 @@
+name: Bootstrap and modernize OpenGarage
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import current upstream source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git remote get-url upstream >/dev/null 2>&1; then
+            git remote add upstream https://github.com/OpenGarage/OpenGarage-Firmware.git
+          fi
+          git fetch --depth=1 upstream master
+          git checkout upstream/master -- Compiled OGBlynkApp OpenGarage docs icons .gitignore LICENSE.md README.md
+
+      - name: Apply Arduino IDE 2 / current-library compatibility layer
+        shell: python
+        run: |
+          from pathlib import Path
+
+          main = Path('OpenGarage/main.cpp')
+          text = main.read_text(encoding='utf-8')
+          text = text.replace('#include <BlynkSimpleEsp8266.h>', '#include "blynk_compat.h"')
+          text = text.replace('Blynk.notify(s);', 'og_blynk_notify(s);')
+          main.write_text(text, encoding='utf-8')
+
+          pio = Path('OpenGarage/platformio.ini')
+          pio_text = pio.read_text(encoding='utf-8')
+          pio_text = pio_text.replace('https://github.com/blynkkk/blynk-library/archive/refs/tags/v1.0.1.zip',
+                                      'https://github.com/blynkkk/blynk-library/archive/refs/tags/v1.3.5.zip')
+          pio.write_text(pio_text, encoding='utf-8')
+
+          compat = r'''#pragma once
+
+// Compatibility bridge for modern Blynk IoT libraries (tested with 1.3.5).
+// Real Blynk IoT deployments should override these at build time with the
+// Template ID and Template Name assigned by Blynk.
+#ifndef BLYNK_TEMPLATE_ID
+#define BLYNK_TEMPLATE_ID "TMPL_OPENGARAGE"
+#endif
+
+#ifndef BLYNK_TEMPLATE_NAME
+#define BLYNK_TEMPLATE_NAME "OpenGarage"
+#endif
+
+#ifndef OG_BLYNK_EVENT_CODE
+#define OG_BLYNK_EVENT_CODE "opengarage"
+#endif
+
+#include <BlynkSimpleEsp8266.h>
+
+inline void og_blynk_notify(const String& message) {
+  // Blynk legacy notify() was removed. Modern Blynk uses template events.
+  Blynk.logEvent(OG_BLYNK_EVENT_CODE, message);
+}
+'''
+          Path('OpenGarage/blynk_compat.h').write_text(compat, encoding='utf-8')
+
+          props = '''name=OpenGarage
+version=2.3.1-modern
+sentence=OpenGarage firmware compatibility package for ESP8266.
+paragraph=Modernized OpenGarage firmware with Arduino IDE 2 and current-library compatibility helpers.
+category=Device Control
+url=https://github.com/brendelj/OpenGarage-Firmware
+architectures=esp8266
+includes=OpenGarage.h
+'''
+          Path('OpenGarage/library.properties').write_text(props, encoding='utf-8')
+
+          guide = '''# Arduino IDE 2 build notes
+
+This fork tracks the current OpenGarage firmware and adds a thin compatibility layer for newer Arduino/ESP8266 libraries.
+
+## Important library choices
+
+- Board package: ESP8266 by ESP8266 Community, core 3.1.2 or later compatible 3.x release.
+- MQTT: **PubSubClient by Nick O'Leary (knolleary)**. Do not install similarly named libraries containing `src/MQTT.cpp`; those are a different library.
+- Blynk: 1.3.5. The old `Blynk.notify()` call is routed through `blynk_compat.h` to `Blynk.logEvent()`.
+- For Blynk IoT, define your real `BLYNK_TEMPLATE_ID` and `BLYNK_TEMPLATE_NAME` and create an event with code `opengarage`, or override `OG_BLYNK_EVENT_CODE`.
+- HTTPClient uses the modern `begin(WiFiClient, url)` API already present in current upstream OpenGarage.
+
+## Arduino IDE library recognition
+
+`OpenGarage/library.properties` is included so Arduino IDE 2 recognizes the `OpenGarage` directory as a library when installed under the sketchbook `libraries` directory.
+
+## Why this fork exists
+
+Upstream PlatformIO intentionally pins known-compatible versions. This fork keeps those dependencies explicit while adapting removed APIs at the OpenGarage boundary so library upgrades do not require scattering compatibility edits throughout `main.cpp`.
+'''
+          Path('ARDUINO_IDE_2.md').write_text(guide, encoding='utf-8')
+
+      - name: Commit imported and modernized firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "OpenGarage modernization bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "Import upstream and add current-library compatibility layer"
+          git push origin HEAD:main
